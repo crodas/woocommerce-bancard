@@ -20,9 +20,32 @@ class WC_Gateway_Bancard extends WC_Payment_Gateway {
 
 		if ( ! $this->is_valid_for_use() ) {
 			$this->enabled = 'no';
+		} else {
+			$this->maybe_catch_reply();
 		}
 
 		add_action( 'woocommerce_update_options_payment_gateways_' . $this->id, array( $this, 'process_admin_options' ) );
+	}
+
+	protected function maybe_catch_reply() {
+		$params = array( 'order_id', 'buy_id', 'bancard_reply', 'token' );
+		$to_sign   = array();
+
+		foreach ( $params as $name ) {
+			if ( empty( $_GET[ $name ] ) ) {
+				return false;
+			}
+			$to_sign[ $name ] = $_GET[ $name ];
+		}
+
+		unset( $to_sign['token'] );
+
+		if ( $_GET['token'] !== wp_create_nonce( serialize( $to_sign ) ) ) {
+			return false;
+		}
+
+
+		var_dump( $params );exit;
 	}
 
 	public function get_icon() {
@@ -70,22 +93,28 @@ class WC_Gateway_Bancard extends WC_Payment_Gateway {
 		throw new RuntimeException( 'Invalid response from Bancard API: ' . $response['body'] );
 	}
 
-	protected function return_url( $order_id, $buy_id, $bancard_reply ) {
+	protected function return_url( $order, $buy_id, $bancard_reply = 'success' ) {
+		$order_id = (string) $order->get_id();
+		$buy_id   = (string) $buy_id;
 		$args = compact( 'order_id', 'buy_id', 'bancard_reply' );
 		$args['token'] = wp_create_nonce( serialize( $args ) );
 
-		return add_query_arg( $args, get_site_url() );
+		$base_url = $order->get_checkout_order_received_url();
+
+		return add_query_arg( $args, $base_url );
 	}
 
 	public function process_payment( $order_id ) {
 		$order = wc_get_order( $order_id );
 		$buy_id = rand(1, 1000000);
 
+		die($this->return_url( $order, $buy_id ));
+
 		$request = array(
 			'public_key' => $this->get_option( 'public_key'),
 			'operation' => array(
-				'return_url' => $this->return_url( $order_id, $buy_id, 'success' ),
-				'cancel_url' => $this->return_url( $order_id, $buy_id, 'cancel' ),
+				'return_url' => $this->return_url( $order, $buy_id ),
+				'cancel_url' => $order->get_cancel_order_url_raw(),
 				'shop_process_id' => (string)$buy_id,
 				'additional_data' => '',
 				'description' => 'WooCommerce Order #' . $order_id,
