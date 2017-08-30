@@ -11,24 +11,6 @@ class WC_Bancard_Util {
 		return $data[ $key ];
 	}
 
-	public static function maybe_create_tables() {
-		global $wpdb;
-
-		if ( ! is_callable( 'dbDelta' ) ) {
-			require( ABSPATH . 'wp-admin/includes/upgrade.php' );
-		}
-
-		dbDelta( 'CREATE TABLE `' . $wpdb->prefix . 'bancard` (
-			`id` bigint(20) NOT NULL AUTO_INCREMENT,
-			`order_id` bigint(20) NOT NULL,
-			`authorization_number` bigint(20) NOT NULL DEFAULT "0",
-			`response_description` text,
-			`ticket_number` bigint(21) NOT NULL DEFAULT "0",
-			`confirmed` smallint default "0",
-			PRIMARY KEY (`id`)
-		)' );
-	}
-
 	public static function sign() {
 		return md5( self::get( 'private_key' ) . implode( '', func_get_args()) );
 	}
@@ -52,12 +34,12 @@ class WC_Bancard_Util {
 		$json = json_encode( $args );
 
 		$response = wp_remote_post( self::url( $url ), array(
-			'method'	 => 'POST',
-			'body'	   => $json,
+			'method'  => 'POST',
+			'body'	  => $json,
 			'httpversion' => '1.1',
-			'compress'   => false,
-			'user-agent' => 'WP-Bancard API',
-			'headers'	=> array(
+			'compress'    => false,
+			'user-agent'  => 'WP-Bancard API',
+			'headers'     => array(
 				'Referer' => '',
 				'Content-Type' =>'application/json',
 				'Content-Length' => strlen($json),
@@ -72,22 +54,14 @@ class WC_Bancard_Util {
 		throw new RuntimeException( 'Invalid response from Bancard API: ' . $response['body'] );
 	}
 
-
 	public static function create(WC_Order $order) {
-		global $wpdb;
-
-		$wpdb->insert( $wpdb->prefix . 'bancard', array(
-			'order_id' => $order->get_id(),
-		) );
-
-		$buy_id = $wpdb->insert_id;
 
 		$request = array(
 			'public_key' => self::get( 'public_key'),
 			'operation' => array(
 				'return_url' => self::return_url( $order, $buy_id ),
 				'cancel_url' => $order->get_cancel_order_url_raw(),
-				'shop_process_id' => (string)$buy_id,
+				'shop_process_id' => (string)$order->get_id(),
 				'additional_data' => '',
 				'description' => get_bloginfo( 'name') . ' #' . $order->get_id(),
 				'amount' => number_format( (float)$order->get_total(), 2, '.', '' ),
@@ -101,6 +75,8 @@ class WC_Bancard_Util {
 			$request['operation']['currency']
 		);
 
+		$order->update_status( 'on-hold', __( 'Awaiting payment confirmation', 'woocommerce-bancard' ) );
+
 		$response = self::do_request( '/vpos/api/0.3/single_buy', $request );
 
 		return array(
@@ -110,34 +86,45 @@ class WC_Bancard_Util {
 	}
 
 	public static function init() {
-		global $wpdb;
-
-		self::maybe_create_tables();
-
 		if ( empty( $_GET['bancard'] ) ) {
 			return;
 		}
 
 		header( 'Content-Type: application/json' );
 
+		$logger = wc_get_logger();
+
 		try {
-			$body = json_decode( file_get_contents( 'php://input' ), true );
-			if ( ! is_array( $body ) ) {
+			$json = file_get_contents( 'php://input' );
+			$body = json_decode( $json, true );
+			$logger->debug( print_r( $body, true ), array( 'source' => 'bancard-request' ) );
+
+			if ( ! is_array( $body ) || empty( $body['operation'] ) ) {
 				throw new Exception( 'Invalid request body' );
 			}
 
+			$operation = (array) $body['operation'];
+
 			$expected_signature = self::sign(
-				$body['operation']['shop_process_id'], 
+				$operation['shop_process_id'],
 				'confirm',
-				$body['operation']['amount'],
-				$body['operation']['currency']
+				$operation['amount'],
+				$operation['currency']
 			);
 
-			if ( $body['operation']['token'] !== $expected_signature ) {
+			if ( $operation['token'] !== $expected_signature ) {
 				throw new Error( 'Invalid signature' );
 			}
 
+			$order = wc_get_order( (int)$operation['shop_process_id'] );
+			if ( empty( $order ) ) {
+				throw new RuntimeException( 'Invalid shop_process_id (' . $operation['shop_process_id'] . ')' );
+			}
+
 		} catch ( Exception $e ) {
+            $logger->error( did_action('woocommerce_after_register_post_type') ? 'yes' : 'no',
+                    array('source' => 'bancard-error' ) );
+			$logger->error( $e->getMessage(), array( 'source' => 'bancard-error' ) );
 			header( 'HTTP/1.0 400 Bad Request' );
 			echo json_encode( array(
 				'status' => 'error',
@@ -146,12 +133,23 @@ class WC_Bancard_Util {
 			exit;
 		}
 
-		file_put_contents( '/tmp/debug.txt', print_r( $body , true ) );
+		if ( ! empty( $operation['authorization_number'] ) && is_numeric( $operation['authorization_number'] ) ) {
+			$order->add_order_note( sprintf(
+				__( 'Bancard: %s. Autorización %d', 'woocommerce-bancard' ),
+				$operation['response_description'],
+				$operation['authorization_number']
+			) );
+			foreach ( $operation as $operation => $value ) {
+				update_post_meta( $order->get_id(), '_bancard_' . $operation, $value );
+			}
+			$order->payment_complete();
+		} else {
+			$order->add_order_note( sprintf(
+				__( 'Bancard: %s', 'woocommerce-bancard' ),
+				$operation['response_description']
+			) );
 
-		$wpdb->update( $wpdb->prefix . 'bancard', array(
-			'authorization_number' => $body['operation']['authorization_number'],
-			'ticket_number' => $body['operation']['ticket_number'],
-			'confirmed' => 1,
-		), array( 'id' => $body['operation']['shop_process_id'] ) );
+			$order->update_status( 'failed' );
+		}
 	}
 }

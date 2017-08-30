@@ -16,4 +16,4 @@ function woocommerce_bancard_register( $methods ) {
 }
 
 add_filter( 'woocommerce_payment_gateways', 'woocommerce_bancard_register' );
-add_filter( 'plugins_loaded', 'WC_Bancard_Util::init' );
+add_filter( 'init', 'WC_Bancard_Util::init', 9999 );
