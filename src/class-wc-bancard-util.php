@@ -86,8 +86,16 @@ class WC_Bancard_Util {
 	}
 
 	public static function init() {
-		if ( empty( $_GET['bancard'] ) ) {
-			return;
+		parse_str( parse_url( self::get( 'url' ), PHP_URL_QUERY ), $args );
+
+		if ( empty( $args ) ) {
+			return false;
+		}
+
+		foreach ( $args as $key => $value ) {
+			if ( empty( $_GET[ $key ] ) || $value !== $_GET[ $key ] ) {
+				return false;
+			}
 		}
 
 		header( 'Content-Type: application/json' );
@@ -122,8 +130,6 @@ class WC_Bancard_Util {
 			}
 
 		} catch ( Exception $e ) {
-            $logger->error( did_action('woocommerce_after_register_post_type') ? 'yes' : 'no',
-                    array('source' => 'bancard-error' ) );
 			$logger->error( $e->getMessage(), array( 'source' => 'bancard-error' ) );
 			header( 'HTTP/1.0 400 Bad Request' );
 			echo json_encode( array(

@@ -62,6 +62,11 @@ class WC_Gateway_Bancard extends WC_Payment_Gateway {
 				'description' => __( 'Clave privada provista por Bancard', 'woocommerce-bancard' ),
 				'desc_tip'	=> true,
 			),
+			'url' => array(
+				'title' => __( 'URL de Confirmación del pago', 'woocommerce-bancard' ),
+				'type'  => 'text',
+				'default' => add_query_arg( 'bancard', wp_create_nonce( 'bancard' ),  home_url( '/' ) ),
+			),
 		);
 	}
 
