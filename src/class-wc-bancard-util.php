@@ -1,36 +1,95 @@
 <?php
 
+/**
+ * Bancard Util
+ *
+ * This class is a set of util static methods used for the Bancard API.
+ *
+ * If you can choose any modern Gateway I urge you to do that, this API has security flaws
+ * explained in the code.
+ *
+ * I wrote this plugin so if you don't have a choise at least you can use a secure implementation.
+ *
+ */
 class WC_Bancard_Util {
+	/**
+	 * Bancard's API urls.
+	 */
 	protected static $url = array(
 		'live' => 'https://vpos.infonet.com.py',
 		'stage' => 'https://vpos.infonet.com.py:8888',
 	);
 
+	/**
+	 * Reads a configuration out of WooCommerce settings.
+	 *
+	 * This function will read the WooCommerce bancard settings directly, it is done this way so
+	 * we can read even properties even before the gateways are loaded.
+	 *
+	 * If a given property is not found NULL will be returned instead.
+	 *
+	 * @param string $key Property name
+	 *
+	 * @return mixed
+	 */
 	public static function get( $key ) {
 		$data = maybe_unserialize( get_option( 'woocommerce_bancard_settings' ) );
+
+		if ( ! array_key_exists( $key, $data ) ) {
+			return null;
+		}
+
 		return $data[ $key ];
 	}
 
+	/**
+	 * "Signs" data
+	 *
+	 * Signs all the function parameters in the "Bancard way".
+	 *
+	 * Couple of security notes here:
+	 *
+	 *   1. They use a pretty weak algorithm, md5.
+	 *   2. They choose to sign just a few fields per request. Not all the data.
+	 *      That is just silly.
+	 *
+	 * Although I would design things differently, this sign must be compatible with Bancard
+	 * weak design.
+	 *
+	 * @return string
+	 */
 	public static function sign() {
 		return md5( self::get( 'private_key' ) . implode( '', func_get_args()) );
 	}
 
-	protected static function url($url) {
-		return ( self::get( 'stage' ) ? self::$url['stage'] : self::$url['live'] ) . $url;
+	/**
+	 * Returns bancard's API url
+	 *
+	 * It will return the full API url, either stage or production
+	 *
+	 * @param $path URL path
+	 *
+	 * @return string Full URL
+	 */
+	protected static function url($path) {
+		return ( self::get( 'stage' ) ? self::$url['stage'] : self::$url['live'] ) . $path;
 	}
 
-	protected static function return_url( $order, $buy_id ) {
-		$order_id = (string) $order->get_id();
-		$buy_id   = (string) $buy_id;
-		$args = compact( 'order_id', 'buy_id' );
-		$args['token'] = wp_create_nonce( serialize( $args ) );
-
-		$base_url = $order->get_checkout_order_received_url();
-
-		return add_query_arg( $args, $base_url );
-	}
-
-	protected static function do_request( $url, array $args ) {
+	/**
+	 * Performs an API call to Bancard
+	 *
+	 * The API is a POST call, the request body is serialized as JSON.
+	 *
+	 * This is a function does not sign the API requests automatically, it may do so in the future,
+	 * but right now it is the caller responsability to sign their requests and make sure the
+	 * reply is legic  (by checking the response signatures).
+	 *
+	 * @param string $url
+	 * @param array  $args
+	 *
+	 * @return mixed
+	 */
+	protected static function api_exec( $url, array $args ) {
 		$json = json_encode( $args );
 
 		$response = wp_remote_post( self::url( $url ), array(
@@ -54,12 +113,24 @@ class WC_Bancard_Util {
 		throw new RuntimeException( 'Invalid response from Bancard API: ' . $response['body'] );
 	}
 
+	/**
+	 * Creates a Bancard Payments
+	 *
+	 * This function takes a WC_Order and makes a Bancard Payment request. All the details are handled by this
+	 * method. Right now only single_buy is supported.
+	 *
+	 * This function will return an URL which is for your customer.
+	 *
+	 * @param WC_Order $order
+	 *
+	 * @return array
+	 */
 	public static function create(WC_Order $order) {
 
 		$request = array(
 			'public_key' => self::get( 'public_key'),
 			'operation' => array(
-				'return_url' => self::return_url( $order, $buy_id ),
+				'return_url' => $order->get_checkout_order_received_url(),
 				'cancel_url' => $order->get_cancel_order_url_raw(),
 				'shop_process_id' => (string)$order->get_id(),
 				'additional_data' => '',
@@ -77,7 +148,11 @@ class WC_Bancard_Util {
 
 		$order->update_status( 'on-hold', __( 'Awaiting payment confirmation', 'woocommerce-bancard' ) );
 
-		$response = self::do_request( '/vpos/api/0.3/single_buy', $request );
+		$response = self::api_exec( '/vpos/api/0.3/single_buy', $request );
+
+		if ( empty( $response->process_id ) ) {
+			throw new RuntimeException( 'Invalid response from Bancard. Check the logs for a better' );
+		}
 
 		return array(
 			'result' => 'success',
@@ -85,7 +160,18 @@ class WC_Bancard_Util {
 		);
 	}
 
-	public static function init() {
+	/**
+	 * Handles the Payment notification
+	 *
+	 * This method handles a payment notification send by Bancard, if the current request is a payment notification.
+	 *
+	 * Be sure to setup the notification URL properly in Bancard's dashboard.
+	 *
+	 * If this is a payment notification it will exit inmmediable and return data the way bancard expects it.
+	 *
+	 * It is a good idea to let the URL generated automatically.
+	 */
+	public static function maybe_handle_payment_notification() {
 		parse_str( parse_url( self::get( 'url' ), PHP_URL_QUERY ), $args );
 
 		if ( empty( $args ) ) {
@@ -159,3 +245,5 @@ class WC_Bancard_Util {
 		}
 	}
 }
+
+add_filter( 'init', 'WC_Bancard_Util::maybe_handle_payment_notification', 9999 );

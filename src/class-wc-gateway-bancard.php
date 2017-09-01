@@ -1,14 +1,20 @@
 <?php
 
+/**
+ * Bancard Gateway definition
+ *
+ * This is the bancard definition for WooCommerce. This class handles all the basics configurations.
+ *
+ */
 class WC_Gateway_Bancard extends WC_Payment_Gateway {
 
 	public function __construct() {
-		$this->id				 = 'bancard';
-		$this->has_fields		 = false;
-		$this->order_button_text  = __( 'Pagar con Bancard', 'woocommerce-bancard' );
-		$this->method_title	   = __( 'Bancard', 'woocommerce-bancard' );
+		$this->id                = 'bancard';
+		$this->has_fields        = false;
+		$this->order_button_text = __( 'Pagar con Bancard', 'woocommerce-bancard' );
+		$this->method_title      = __( 'Bancard', 'woocommerce-bancard' );
 		$this->method_description = '';
-		$this->supports		   = array( 'products' );
+		$this->supports	          = array( 'products' );
 
 		$this->init_form_fields();
 		$this->init_settings();
