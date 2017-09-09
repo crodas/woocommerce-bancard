@@ -243,6 +243,9 @@ class WC_Bancard_Util {
 
 			$order->update_status( 'failed' );
 		}
+
+		echo json_encode( array( 'status' => 'success' ) ) ;
+		exit;
 	}
 }
 
