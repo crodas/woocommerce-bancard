@@ -51,7 +51,7 @@ class WC_Bancard_Util {
 	 *
 	 *   1. They use a pretty weak algorithm, md5.
 	 *   2. They choose to sign just a few fields per request. Not all the data.
-	 *      That is just silly.
+	 *	  That is just silly.
 	 *
 	 * Although I would design things differently, this sign must be compatible with Bancard
 	 * weak design.
@@ -91,26 +91,36 @@ class WC_Bancard_Util {
 	 */
 	protected static function api_exec( $url, array $args ) {
 		$json = json_encode( $args );
+		$url  = self::url( $url );
 
-		$response = wp_remote_post( self::url( $url ), array(
+		$response = wp_remote_post( $url, array(
 			'method'  => 'POST',
 			'body'	  => $json,
 			'httpversion' => '1.1',
-			'compress'    => false,
+			'compress'	=> false,
 			'user-agent'  => 'WP-Bancard API',
-			'headers'     => array(
+			'headers'	 => array(
 				'Referer' => '',
 				'Content-Type' =>'application/json',
 				'Content-Length' => strlen($json),
 			),
 		) );
 
+		if ( is_wp_error( $response ) ) {
+			throw new Exception( $response->get_error_message() );
+		}
+
 		$object = json_decode( $response['body'] );
 		if ( is_object( $object ) && 'success' === $object->status ) {
 			return $object;
 		}
 
-		throw new RuntimeException( 'Invalid response from Bancard API: ' . $response['body'] );
+		$error = new RuntimeException( 'Invalid response from Bancard' );
+		if ( 'error' === $object->status && ! empty( $object->messages ) ) {
+			$error->response = $object->messages[0]->key;
+		}
+
+		throw $error;
 	}
 
 	/**
@@ -126,13 +136,14 @@ class WC_Bancard_Util {
 	 * @return array
 	 */
 	public static function create(WC_Order $order) {
+		$shop_process_id = (string)$order->get_id();
 
 		$request = array(
 			'public_key' => self::get( 'public_key'),
 			'operation' => array(
 				'return_url' => $order->get_checkout_order_received_url(),
 				'cancel_url' => $order->get_cancel_order_url_raw(),
-				'shop_process_id' => (string)$order->get_id(),
+				'shop_process_id' => $shop_process_id,
 				'additional_data' => '',
 				'description' => get_bloginfo( 'name') . ' #' . $order->get_id(),
 				'amount' => number_format( (float)$order->get_total(), 2, '.', '' ),
@@ -150,9 +161,12 @@ class WC_Bancard_Util {
 
 		$response = self::api_exec( '/vpos/api/0.3/single_buy', $request );
 
+
 		if ( empty( $response->process_id ) ) {
 			throw new RuntimeException( 'Invalid response from Bancard. Check the logs for a better' );
 		}
+
+		wp_schedule_single_event( strtotime( '+10 minutes' ), 'bancard_cancel_transaction', array( $shop_process_id ) );
 
 		return array(
 			'result' => 'success',
@@ -215,6 +229,8 @@ class WC_Bancard_Util {
 				throw new RuntimeException( 'Invalid shop_process_id (' . $operation['shop_process_id'] . ')' );
 			}
 
+			wp_schedule_single_event( time(), 'bancard_check_confirmation', array( $operation['shop_process_id'] ) );
+
 		} catch ( Exception $e ) {
 			$logger->error( $e->getMessage(), array( 'source' => 'bancard-error' ) );
 			header( 'HTTP/1.0 400 Bad Request' );
@@ -225,28 +241,90 @@ class WC_Bancard_Util {
 			exit;
 		}
 
-		if ( ! empty( $operation['authorization_number'] ) && is_numeric( $operation['authorization_number'] ) ) {
+
+		echo json_encode( array( 'status' => 'success' ) ) ;
+		exit;
+	}
+
+	public static function cancel_transaction( $order_id ) {
+		try {
+			$order = wc_get_order( $order_id );
+			$response = self::api_exec( '/vpos/api/0.3/single_buy/rollback', array(
+				'public_key' => self::get( 'public_key' ),
+				'operation' => array(
+					'shop_process_id' => $order_id,
+					'token' => self::sign(
+						$order_id,
+						'rollback',
+						'0.00'
+					)
+				),
+			) );
+		} catch ( RuntimeException $exception ) {
+			if ( empty( $exception->response ) ) {
+				return;
+			}
+			switch ( $exception->response ) {
+			case 'PaymentNotFoundError':
+				$order->add_order_note( sprintf(
+					__( 'Bancard: %s', 'woocommerce-bancard' ),
+					'Payment not found after 10 minutes'
+				) );
+				$order->update_status( 'failed' );
+				break;
+			case 'TransactionAlreadyConfirmed':
+				$order->payment_complete();
+				break;
+			}
+		}
+	}
+
+	public static function check_confirmation( $order_id ) {
+		$order = wc_get_order( $order_id );
+
+		$response = self::api_exec( '/vpos/api/0.3/single_buy/confirmations', array(
+			'public_key' => self::get( 'public_key' ),
+			'operation' => array(
+				'shop_process_id' => $order_id,
+				'token' => self::sign(
+					$order_id,
+					'get_confirmation'
+				)
+			),
+		) );
+
+		if ( is_wp_error( $response ) ) {
+			return;
+		}
+
+		$response = (array)$response->confirmation;
+
+		if ( ! empty( $response['authorization_number'] ) && is_numeric( $response['authorization_number'] ) ) {
 			$order->add_order_note( sprintf(
 				__( 'Bancard: %s. Autorización %d', 'woocommerce-bancard' ),
-				$operation['response_description'],
-				$operation['authorization_number']
+				$response['response_description'],
+				$response['authorization_number']
 			) );
-			foreach ( $operation as $operation => $value ) {
+			foreach ( $response as $operation => $value ) {
 				update_post_meta( $order->get_id(), '_bancard_' . $operation, $value );
 			}
 			$order->payment_complete();
 		} else {
 			$order->add_order_note( sprintf(
 				__( 'Bancard: %s', 'woocommerce-bancard' ),
-				$operation['response_description']
+				$response['response_description']
 			) );
 
 			$order->update_status( 'failed' );
 		}
+	}
 
-		echo json_encode( array( 'status' => 'success' ) ) ;
-		exit;
+
+	public static function init() {
+		add_action( 'bancard_check_confirmation', __CLASS__ . '::check_confirmation', 10, 1 );
+		add_action( 'bancard_cancel_transaction', __CLASS__ . '::cancel_transaction', 10, 1 );
 	}
 }
 
+add_filter( 'init', 'WC_Bancard_Util::init' );
 add_filter( 'init', 'WC_Bancard_Util::maybe_handle_payment_notification', 9999 );
