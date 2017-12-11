@@ -229,8 +229,6 @@ class WC_Bancard_Util {
 				throw new RuntimeException( 'Invalid shop_process_id (' . $operation['shop_process_id'] . ')' );
 			}
 
-			wp_schedule_single_event( time(), 'bancard_check_confirmation', array( $operation['shop_process_id'] ) );
-
 		} catch ( Exception $e ) {
 			$logger->error( $e->getMessage(), array( 'source' => 'bancard-error' ) );
 			header( 'HTTP/1.0 400 Bad Request' );
@@ -241,6 +239,24 @@ class WC_Bancard_Util {
 			exit;
 		}
 
+		if ( ! empty( $operation['authorization_number'] ) && is_numeric( $operation['authorization_number'] ) ) {
+			$order->add_order_note( sprintf(
+				__( 'Bancard: %s. Autorización %d', 'woocommerce-bancard' ),
+				$operation['response_description'],
+				$operation['authorization_number']
+			) );
+			foreach ( $operation as $operation => $value ) {
+				update_post_meta( $order->get_id(), '_bancard_' . $operation, $value );
+			}
+			$order->payment_complete();
+		} else {
+			$order->add_order_note( sprintf(
+				__( 'Bancard: %s', 'woocommerce-bancard' ),
+				$operation['response_description']
+			) );
+
+			$order->update_status( 'failed' );
+		}
 
 		echo json_encode( array( 'status' => 'success' ) ) ;
 		exit;
