@@ -35,7 +35,7 @@ class WC_Bancard_Util {
 	public static function get( $key ) {
 		$data = maybe_unserialize( get_option( 'woocommerce_bancard_settings' ) );
 
-		if ( ! array_key_exists( $key, $data ) ) {
+		if ( ! array_key_exists( $key, (array) $data ) ) {
 			return null;
 		}
 
